@@ -3,156 +3,127 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 
-st.set_page_config("Dekabr 2025 Analitika", layout="wide")
-st.title("📊 Dekabr 2025 — Mahsulotlar bo‘yicha chuqur analiz")
+st.set_page_config("Dekabr 2025 — Real Foyda Analizi", layout="wide")
+st.title("💰 Mahsulotlar bo‘yicha REAL foyda & ML tavsiya")
 
 # =====================================================
-# 1. EXCEL YUKLASH
+# FILE UPLOAD
 # =====================================================
-orders_file = st.file_uploader("📥 Zakazlar Excel", type=["xlsx"])
-returns_file = st.file_uploader("📥 Sotuv / Qaytish Excel", type=["xlsx"])
+orders_file = st.file_uploader("📥 Zakazlar (Excel)", type=["xlsx"])
+sales_file  = st.file_uploader("📥 Sotuv / Qaytish (Excel)", type=["xlsx"])
 
-if not orders_file or not returns_file:
+if not orders_file or not sales_file:
     st.stop()
 
 orders = pd.read_excel(orders_file)
-returns = pd.read_excel(returns_file)
+sales  = pd.read_excel(sales_file)
 
 # =====================================================
-# 2. KERAKLI USTUNLAR
+# COLUMNS
 # =====================================================
 orders = orders[[
     "Период", "Номенклатура", "Количество", "Сумма"
 ]]
 
-returns = returns[[
-    "Период", "Номенклатура", "Количество",
-    "Продажная сумма", "Возврат сумма"
+sales = sales[[
+    "Период", "Номенклатура",
+    "Продажная сумма",
+    "Себестоимость сумма",
+    "Возврат сумма"
 ]]
 
 # =====================================================
-# 3. TYPE FIX
+# TYPE FIX
 # =====================================================
-for df in [orders, returns]:
+for df in [orders, sales]:
     df["Период"] = pd.to_datetime(df["Период"], errors="coerce")
 
 orders["Количество"] = orders["Количество"].astype(float)
 orders["Сумма"] = orders["Сумма"].astype(str).str.replace(",", "").astype(float)
 
-returns["Количество"] = returns["Количество"].astype(float)
-returns["Возврат сумма"] = returns["Возврат сумма"].astype(str).str.replace(",", "").astype(float)
+for col in ["Продажная сумма", "Себестоимость сумма", "Возврат сумма"]:
+    sales[col] = sales[col].astype(str).str.replace(",", "").astype(float)
 
 # =====================================================
-# 4. 30 KUNLIK DEKABR FILTER
+# DATE FILTER — DEKABR 2025
 # =====================================================
-date_from = st.date_input("📅 Sana boshlanishi", pd.to_datetime("2025-12-01"))
-date_to   = st.date_input("📅 Sana oxiri", pd.to_datetime("2025-12-31"))
+date_from = pd.to_datetime("2025-12-01")
+date_to   = pd.to_datetime("2025-12-31")
 
-orders = orders[(orders["Период"] >= pd.to_datetime(date_from)) &
-                (orders["Период"] <= pd.to_datetime(date_to))]
-
-returns = returns[(returns["Период"] >= pd.to_datetime(date_from)) &
-                  (returns["Период"] <= pd.to_datetime(date_to))]
-
-orders["day"] = orders["Период"].dt.date
-returns["day"] = returns["Период"].dt.date
+orders = orders[(orders["Период"] >= date_from) & (orders["Период"] <= date_to)]
+sales  = sales[(sales["Период"] >= date_from) & (sales["Период"] <= date_to)]
 
 # =====================================================
-# 5. KUNLIK + MAHSULOT ANALIZI
+# AGGREGATION
 # =====================================================
-daily_orders = orders.groupby(["day", "Номенклатура"], as_index=False).agg(
+orders_agg = orders.groupby("Номенклатура", as_index=False).agg(
     sold_qty=("Количество", "sum"),
     sold_sum=("Сумма", "sum")
 )
 
-daily_returns = returns.groupby(["day", "Номенклатура"], as_index=False).agg(
+sales_agg = sales.groupby("Номенклатура", as_index=False).agg(
+    cost_sum=("Себестоимость сумма", "sum"),
     return_sum=("Возврат сумма", "sum")
 )
 
-daily = pd.merge(
-    daily_orders, daily_returns,
-    on=["day", "Номенклатура"], how="left"
-).fillna(0)
+df = orders_agg.merge(sales_agg, on="Номенклатура", how="left").fillna(0)
 
 # =====================================================
-# 6. FOYDA / ZARAR %
+# REAL PROFIT
 # =====================================================
-daily["loss_percent"] = (daily["return_sum"] / daily["sold_sum"] * 100).clip(0,100)
-daily["profit_percent"] = 100 - daily["loss_percent"]
+df["real_profit"] = df["sold_sum"] - df["cost_sum"] - df["return_sum"]
+df["profit_percent"] = (df["real_profit"] / df["sold_sum"] * 100).clip(-100,100)
 
-daily["status"] = np.where(
-    daily["loss_percent"] > 20,
-    "❌ ZARARLI",
-    "✅ FOYDALI"
+df["status"] = np.where(
+    df["real_profit"] < 0,
+    "❌ ZARAR",
+    "✅ FOYDA"
 )
 
 # =====================================================
-# 7. MAHSULOT BO‘YICHA YAKUNIY ANALIZ
+# ML MODEL
 # =====================================================
-product_summary = daily.groupby("Номенклатура", as_index=False).agg(
-    sold_sum=("sold_sum", "sum"),
-    return_sum=("return_sum", "sum"),
-    avg_loss_percent=("loss_percent", "mean"),
-    avg_profit_percent=("profit_percent", "mean")
-)
-
-product_summary["status"] = np.where(
-    product_summary["avg_loss_percent"] > 20,
-    "❌ ZARARLI",
-    "✅ FOYDALI"
-)
-
-# =====================================================
-# 8. ML: 100% FOYDA STRATEGIYASI
-# =====================================================
-X = daily[["sold_qty", "sold_sum"]]
-y = daily["loss_percent"]
+X = df[["sold_qty", "sold_sum", "cost_sum", "return_sum"]]
+y = df["profit_percent"]
 
 model = RandomForestRegressor(
-    n_estimators=200,
+    n_estimators=300,
     max_depth=6,
     random_state=42
 )
 model.fit(X, y)
 
-daily["predicted_loss"] = model.predict(X).clip(0,100)
-daily["recommended_profit"] = 100 - daily["predicted_loss"]
+df["ml_profit_forecast"] = model.predict(X).clip(-100,100)
 
-# =====================================================
-# 9. JADVALLAR
-# =====================================================
-st.subheader("📦 Har bir mahsulot bo‘yicha yakuniy natija")
-st.dataframe(product_summary.sort_values("avg_loss_percent", ascending=False),
-             use_container_width=True)
-
-st.subheader("📅 Kunlik (30 kun) batafsil analiz")
-st.dataframe(daily.sort_values("loss_percent", ascending=False),
-             use_container_width=True)
-
-# =====================================================
-# 10. DIAGRAMMALAR
-# =====================================================
-st.subheader("📊 Eng zararli mahsulotlar (%)")
-fig, ax = plt.subplots(figsize=(10,5))
-product_summary.set_index("Номенклатура")["avg_loss_percent"].plot(
-    kind="bar", ax=ax
+df["ml_recommendation"] = np.where(
+    df["ml_profit_forecast"] < 0,
+    "❌ To‘xtatish kerak",
+    np.where(df["ml_profit_forecast"] < 10,
+             "⚠️ Kam hajmda ishlash",
+             "✅ Ko‘paytirish mumkin")
 )
-ax.set_ylabel("Zarar %")
+
+# =====================================================
+# OUTPUT
+# =====================================================
+st.subheader("📦 Mahsulot bo‘yicha REAL foyda")
+st.dataframe(
+    df.sort_values("profit_percent"),
+    use_container_width=True
+)
+
+# =====================================================
+# VISUALS
+# =====================================================
+st.subheader("📊 Foyda % diagramma")
+fig, ax = plt.subplots(figsize=(10,5))
+df.set_index("Номенклатура")["profit_percent"].plot(kind="bar", ax=ax)
+ax.set_ylabel("Foyda %")
 st.pyplot(fig)
 
-st.subheader("📈 Kunlik zarar dinamikasi")
-fig2, ax2 = plt.subplots(figsize=(10,5))
-daily.groupby("day")["loss_percent"].mean().plot(ax=ax2)
-ax2.set_ylabel("O‘rtacha zarar %")
-st.pyplot(fig2)
-
-# =====================================================
-# 11. XULOSA
-# =====================================================
 st.success("""
-✅ Har bir mahsulotning foyda / zarar foizi hisoblandi  
-✅ 30 kunlik kunlik analiz qilindi  
-✅ ML orqali zarar ehtimoli va foyda strategiyasi topildi  
+✅ REAL foyda hisoblandi  
+✅ Себестоимость hisobga olindi  
+✅ ML tavsiyalar tayyor  
 """)
