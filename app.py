@@ -6,142 +6,175 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
-st.set_page_config(page_title="Mahsulot Zarar Analizi", layout="wide")
+st.set_page_config(page_title="Dekabr 2025 Mahsulot Analizi", layout="wide")
+st.title("📊 Dekabr 2025 — Mahsulotlar bo‘yicha foyda / zarar analizi")
 
-st.title("📊 Mahsulotlar bo‘yicha zarar / foyda analitikasi")
+# ==================================================
+# 1. EXCEL FAYLLAR
+# ==================================================
+orders_file = st.file_uploader("1️⃣ Zakazlar Excel", type=["xlsx", "xls"])
+returns_file = st.file_uploader("2️⃣ Sotuv / Qaytish Excel", type=["xlsx", "xls"])
 
-# =========================
-# 1. EXCEL YUKLASH
-# =========================
-file = st.file_uploader("📂 Sotuv / Qaytish Excel faylni yuklang", type=["xlsx", "xls"])
-
-if not file:
-    st.info("Excel fayl yuklang")
+if not orders_file or not returns_file:
+    st.info("Ikkala Excel faylni yuklang")
     st.stop()
 
-df = pd.read_excel(file)
+orders = pd.read_excel(orders_file)
+returns = pd.read_excel(returns_file)
 
-# =========================
-# 2. MAJBURIY USTUNLAR
-# =========================
-required_cols = [
+# ==================================================
+# 2. USTUNLARNI NORMALIZATSIYA
+# ==================================================
+orders = orders[[
     "Период",
     "Номенклатура",
+    "Контрагент",
+    "Количество",
+    "Сумма"
+]]
+
+returns = returns[[
+    "Период",
+    "Номенклатура",
+    "Контрагент",
     "Количество",
     "Продажная сумма",
     "Возврат сумма"
-]
+]]
 
-for col in required_cols:
-    if col not in df.columns:
-        st.error(f"❌ '{col}' ustuni topilmadi")
-        st.stop()
+# ==================================================
+# 3. DATA TYPE FIX
+# ==================================================
+for df in [orders, returns]:
+    df["Период"] = pd.to_datetime(df["Период"], errors="coerce")
 
-# =========================
-# 3. DATA TAYYORLASH
-# =========================
-df["Период"] = pd.to_datetime(df["Период"], errors="coerce")
-df = df.dropna(subset=["Период"])
+orders["Количество"] = orders["Количество"].astype(float)
+orders["Сумма"] = orders["Сумма"].astype(str).str.replace(",", "").astype(float)
 
-df["day"] = df["Период"].dt.date
+returns["Количество"] = returns["Количество"].astype(float)
+returns["Продажная сумма"] = returns["Продажная сумма"].fillna(0)
+returns["Возврат сумма"] = returns["Возврат сумма"].astype(str).str.replace(",", "").astype(float)
 
-# =========================
-# 4. SANA FILTRI
-# =========================
-c1, c2 = st.columns(2)
-date_from = c1.date_input("Boshlanish sana", df["Период"].min())
-date_to   = c2.date_input("Tugash sana", df["Период"].max())
+# ==================================================
+# 4. DEKABR 2025 FILTR
+# ==================================================
+start = pd.to_datetime("2025-12-01")
+end   = pd.to_datetime("2025-12-31")
 
-df = df[
-    (df["Период"] >= pd.to_datetime(date_from)) &
-    (df["Период"] <= pd.to_datetime(date_to))
-]
+orders = orders[(orders["Период"] >= start) & (orders["Период"] <= end)]
+returns = returns[(returns["Период"] >= start) & (returns["Период"] <= end)]
 
-# =========================
+orders["day"] = orders["Период"].dt.date
+returns["day"] = returns["Период"].dt.date
+
+# ==================================================
 # 5. KUNLIK MAHSULOT ANALIZI
-# =========================
-daily = df.groupby(
+# ==================================================
+daily_orders = orders.groupby(
     ["day", "Номенклатура"], as_index=False
 ).agg(
-    sold_qty=("Количество", "sum"),
-    sales_sum=("Продажная сумма", "sum"),
+    order_qty=("Количество", "sum"),
+    order_sum=("Сумма", "sum")
+)
+
+daily_returns = returns.groupby(
+    ["day", "Номенклатура"], as_index=False
+).agg(
+    return_qty=("Количество", "sum"),
     return_sum=("Возврат сумма", "sum")
 )
 
+daily = pd.merge(
+    daily_orders,
+    daily_returns,
+    on=["day", "Номенклатура"],
+    how="left"
+).fillna(0)
+
+# ==================================================
+# 6. ZARAR FOYDA HISOBI
+# ==================================================
 daily["loss_percent"] = np.where(
-    daily["sales_sum"] > 0,
-    (daily["return_sum"] / daily["sales_sum"]) * 100,
+    daily["order_sum"] > 0,
+    (daily["return_sum"] / daily["order_sum"]) * 100,
     0
 ).clip(0, 100)
 
-# =========================
-# 6. ZARAR / FOYDA LABEL
-# =========================
-daily["label"] = np.where(daily["loss_percent"] > 20, 1, 0)
-# 1 = ZARAR, 0 = FOYDA
+daily["status"] = np.where(
+    daily["loss_percent"] > 20,
+    "❌ ZARARLI",
+    "✅ FOYDALI"
+)
 
-# =========================
-# 7. ML MODEL
-# =========================
-X = daily[["sold_qty", "sales_sum", "return_sum", "loss_percent"]]
+# ==================================================
+# 7. ML UCHUN LABEL
+# ==================================================
+daily["label"] = (daily["loss_percent"] > 20).astype(int)
+
+features = [
+    "order_qty",
+    "order_sum",
+    "return_qty",
+    "return_sum",
+    "loss_percent"
+]
+
+X = daily[features]
 y = daily["label"]
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.25, random_state=42
+    X, y, test_size=0.3, random_state=42
 )
 
 model = RandomForestClassifier(
-    n_estimators=150,
+    n_estimators=200,
+    max_depth=6,
     random_state=42
 )
-
 model.fit(X_train, y_train)
-accuracy = accuracy_score(y_test, model.predict(X_test))
 
-# =========================
-# 8. BASHORAT
-# =========================
-daily["prediction"] = model.predict(X)
-daily["Natija"] = daily["prediction"].map({
+daily["ML_bashorat"] = model.predict(X)
+daily["ML_natija"] = daily["ML_bashorat"].map({
     1: "❌ ZARAR keltiradi",
     0: "✅ FOYDA keltiradi"
 })
 
-# =========================
-# 9. JADVAL
-# =========================
-st.subheader("📋 Kunlik mahsulotlar bo‘yicha natija")
+accuracy = accuracy_score(y_test, model.predict(X_test))
+
+# ==================================================
+# 8. JADVAL
+# ==================================================
+st.subheader("📋 Kunlik mahsulotlar natijasi")
 st.dataframe(
-    daily.sort_values("loss_percent", ascending=False),
+    daily.sort_values(["loss_percent"], ascending=False),
     use_container_width=True
 )
 
-# =========================
-# 10. KPI
-# =========================
-st.subheader("📌 Umumiy ko‘rsatkichlar")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("💰 Jami sotuv", f"{daily['sales_sum'].sum():,.0f}")
-c2.metric("↩️ Jami qaytish", f"{daily['return_sum'].sum():,.0f}")
-c3.metric("🧠 ML aniqligi", f"{accuracy*100:.2f}%")
-
-# =========================
-# 11. ENG ZARARLI MAHSULOTLAR
-# =========================
-st.subheader("🚨 Eng zararli mahsulotlar")
+# ==================================================
+# 9. ENG ZARARLI MAHSULOTLAR
+# ==================================================
+st.subheader("🚨 Dekabr oyidagi eng zararli mahsulotlar")
 
 loss_products = (
     daily.groupby("Номенклатура")["loss_percent"]
     .mean()
     .sort_values(ascending=False)
-    .head(10)
 )
 
 fig, ax = plt.subplots(figsize=(10,5))
 loss_products.plot(kind="bar", ax=ax)
 ax.set_ylabel("Zarar %")
-ax.set_title("Top 10 zararli mahsulot")
+ax.set_title("Mahsulotlar bo‘yicha o‘rtacha zarar")
 st.pyplot(fig)
 
-st.success("✅ Analiz yakunlandi")
+# ==================================================
+# 10. KPI
+# ==================================================
+st.subheader("📌 Umumiy ko‘rsatkichlar")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("💰 Jami sotuv", f"{daily['order_sum'].sum():,.0f}")
+c2.metric("↩️ Jami qaytish", f"{daily['return_sum'].sum():,.0f}")
+c3.metric("🧠 ML aniqligi", f"{accuracy*100:.2f}%")
+
+st.success("✅ Analiz to‘liq yakunlandi")
